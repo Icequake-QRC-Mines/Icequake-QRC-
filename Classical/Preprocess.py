@@ -28,7 +28,7 @@ def preprocess_data(data):
 
     # Spliting training/testing data
 
-    feature_cols = ["tide_deriv", "form_fac", "slip_size", "high_t_evt", "tide_height"]
+    feature_cols = ["tide_deriv", "form_fac", "slip_size", "high_t_evt", "tide_height", "time_since"]
 
     X = data[feature_cols] # feature columns/variables
     y = data["TTNS"] # target column
@@ -39,8 +39,8 @@ def preprocess_data(data):
     train_end = int(0.7*n) # 70 % of data for training
     val_end = int(0.85*n) #taking another 15% for validation
 
-    X_train = X.iloc[:train_end]
-    y_train = y.iloc[:train_end]
+    X_train = X.iloc[1:train_end] #to get rid of the NaN value in time since last slip in both x and y 
+    y_train = y.iloc[1:train_end]
 
     X_val = X.iloc[train_end:val_end]
     y_val = y.iloc[train_end:val_end]
