@@ -3,8 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import mean_absolute_error
-
-#Where A1 is filtered time to next slip matrix and A2 is the full data set with features 
+ 
 
 def preprocess_data(filtered_time, data_orig):
     filter_mask = filtered_time.iloc[:,1] != -1 #looking at column 2 of the time filtered data and keeping only the rows that are not -1
@@ -18,7 +17,7 @@ def preprocess_data(filtered_time, data_orig):
 #This is breaking the notebooks and needs to be fixed:
 #Should the time to next event and time since both be converted to hours?
 #Also will need to update the preprocessing function in the other notebooks 
-    TTNS["time_to_next_ev_hr"] = pd.to_datetime(TTNS["time_to_next_ev_hr"]).dt.total_seconds() # converting to date/time object
+    #TTNS["time_to_next_ev_hr"] = pd.to_datetime(TTNS["time_to_next_ev_hr"]).dt.total_seconds() # converting to date/time object
     #TTNS["time_to_next_ev_hr"] = TTNS["time_to_next_ev_hr"].dt.total_seconds() #Putting the time interval in seconds
     '''
     # Constructing the target column
@@ -39,9 +38,10 @@ def preprocess_data(filtered_time, data_orig):
     # Spliting training/testing data
 
     feature_cols = ["tide_deriv", "form_fac", "slip_size", "high_t_evt", "tide_height", "time_since"]
+    data["time_since"] *= 60
 
     X = data[feature_cols] # feature columns/variables
-    y = TTNS # target column
+    y = TTNS["time_to_next_ev_hr"] *3600  # target column and converted to seconds 
 
 #Still need to find a different way to split it 
     n = len(data)
