@@ -5,11 +5,14 @@ import seaborn as sns
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler 
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 
  
 
 def preprocess_data(filtered_time, data_orig):
-    #scaler = StandardScaler()
+    scaler = StandardScaler()
     filter_mask = filtered_time["time_to_next_ev_hr"] != -1 #looking at column 2 of the time filtered data and keeping only the rows that are not -1
     print(filter_mask)
     TTNS = filtered_time[filter_mask.shift(1) & filter_mask][:-1]
@@ -22,8 +25,26 @@ def preprocess_data(filtered_time, data_orig):
     amount_of_known = known_next_slips.shape
     print(known_next_slips.shape)
     print(data_orig.shape)
-    #TTNS["time_to_next_ev_hr"] = scaler.fit_transform(TTNS["time_to_next_ev_hr"])
-    #data = scaler.fit_transform(data)
+
+    '''no_scale_cols = ["high_t_evt", "start_time"]
+    scale_cols = [
+        "tide_h",
+        "tide_deriv",
+        "form_fac",
+        "time_since",
+        "slip_size",
+        "tide_height"
+    ]
+ 
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("scale", StandardScaler(), scale_cols),
+            ("passthrough", "passthrough", no_scale_cols)
+            ]
+    )
+    '''
+
+
 
 #This is breaking the notebooks and needs to be fixed:
 #Should the time to next event and time since both be converted to hours?
@@ -71,6 +92,14 @@ def preprocess_data(filtered_time, data_orig):
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1, shuffle=False)
 
     X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.25, random_state=1, shuffle=False) # 0.25 x 0.8 = 0.2
+
+    print(y_train)
+    print(X_train.head())
+    y_train = scaler.fit_transform(y_train.to_numpy().reshape(-1, 1))
+    y_val = scaler.fit_transform(y_val.to_numpy().reshape(-1, 1))
+    y_test = scaler.fit_transform(y_test.to_numpy().reshape(-1, 1))
+    X_train[["tide_deriv", "form_fac", "slip_size","tide_height", "time_since"]] = scaler.fit_transform(X_train[["tide_deriv", "form_fac", "slip_size", "tide_height", "time_since"]].to_numpy()) 
+    #data = scaler.fit_transform(data)
     
     return X_train, X_val, X_test, y_train, y_val, y_test, feature_cols, amount_of_known
     
