@@ -29,8 +29,24 @@ def preprocess_data(filtered_time, data_orig):
     feature_cols = ["tide_deriv", "form_fac", "time_since", "slip_size", "high_t_evt", "tide_height"]
     known_next_slips["time_since"] *= 60
 
-    X = known_next_slips[feature_cols] 
-    y = TTNS["time_to_next_ev_hr"] *3600  
+   #X = known_next_slips[feature_cols] 
+   #y = TTNS["time_to_next_ev_hr"] *3600  
+
+#Training on subsets: First two years 
+    #X = known_next_slips[feature_cols][:575]
+    #y = TTNS["time_to_next_ev_hr"][:575] * 3600
+
+#Last two years 
+    #X = known_next_slips[feature_cols][4497:]
+    #y = TTNS["time_to_next_ev_hr"][4497:] *3600
+
+#Without the first two yeas and the last two years
+   # X = known_next_slips[feature_cols][575:4497]
+   # y = TTNS["time_to_next_ev_hr"][575:4497] *3600
+
+#Everything except last two years 
+    X = known_next_slips[feature_cols][:4497]
+    y = TTNS["time_to_next_ev_hr"][:4497] *3600
 
 #Splitting for training/validation/testing with random split 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
