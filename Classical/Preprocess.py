@@ -5,6 +5,7 @@ import seaborn as sns
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler 
+from sklearn.utils import resample 
 
  
 
@@ -33,8 +34,8 @@ def preprocess_data(filtered_time, data_orig):
    #y = TTNS["time_to_next_ev_hr"] *3600  
 
 #Training on subsets: First two years 
-    #X = known_next_slips[feature_cols][:575]
-    #y = TTNS["time_to_next_ev_hr"][:575] * 3600
+    X = known_next_slips[feature_cols][:575]
+    y = TTNS["time_to_next_ev_hr"][:575] * 3600
 
 #Last two years 
     #X = known_next_slips[feature_cols][4497:]
@@ -45,11 +46,12 @@ def preprocess_data(filtered_time, data_orig):
    # y = TTNS["time_to_next_ev_hr"][575:4497] *3600
 
 #Everything except last two years 
-    X = known_next_slips[feature_cols][:4497]
-    y = TTNS["time_to_next_ev_hr"][:4497] *3600
-
+    #X = known_next_slips[feature_cols][:4497]
+    #y = TTNS["time_to_next_ev_hr"][:4497] *3600
+#Synthetic Data: 
+    X_bs, y_bs = resample(X, y, n_samples=4000, random_state=42)
 #Splitting for training/validation/testing with random split 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
+    X_train, X_test, y_train, y_test = train_test_split(X_bs, y_bs, test_size=0.2, random_state=1)
 
     X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.25, random_state=1) 
 
