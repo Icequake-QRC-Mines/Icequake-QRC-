@@ -49,12 +49,15 @@ def preprocess_data(filtered_time, data_orig):
     #X = known_next_slips[feature_cols][:4497]
     #y = TTNS["time_to_next_ev_hr"][:4497] *3600
 #Synthetic Data: 
-    X_bs, y_bs = resample(X, y, n_samples=4000, random_state=42)
+    #X_bs, y_bs = resample(X, y, n_samples=4000, random_state=42)
 #Splitting for training/validation/testing with random split 
-    X_train, X_test, y_train, y_test = train_test_split(X_bs, y_bs, test_size=0.2, random_state=1)
+    X_train, X_test, y_train, y_test = train_test_split(X_train, y_train, test_size=0.2, random_state=1)
 
     X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.25, random_state=1) 
 
+    X_train, y_train = resample(X_train, y_train, n_samples=4000, random_state=42)
+    X_val, y_val = resample(X_val, y_val, n_samples=4000, random_state=42)
+    X_test, y_test = resample(X_test, y_test, n_samples=4000, random_state=42)
 #Normalization Using Standard Scalar 
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
