@@ -9,6 +9,8 @@ from sdv.single_table import GaussianCopulaSynthesizer
 from sdv.metadata import SingleTableMetadata
 
 
+
+
 def augment_with_sdv(X, y, target_col, n_samples, random_state=42):
     """Generate synthetic training samples using SDV's GaussianCopulaSynthesizer.
 
@@ -34,7 +36,13 @@ def augment_with_sdv(X, y, target_col, n_samples, random_state=42):
     X_aug = augmented_df.drop(columns=[target_col]).values
     y_aug = augmented_df[target_col].values
 
-    return X_aug, y_aug
+    print(np.min(X_aug))
+    print(np.min(y_aug))
+    print(np.max(X_aug))
+    print(np.max(y_aug))
+
+    return X_aug, y_aug, 
+
 
  
 
@@ -84,8 +92,15 @@ def preprocess_data(filtered_time, data_orig):
 
     X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.25, random_state=3) 
 
+    print(np.min(X_train))
+    print(np.min(y_train))
+    print(np.max(X_train))
+    print(np.max(y_train))
+
 #Augment training data with SDV GaussianCopula (val/test left untouched)
     X_train, y_train = augment_with_sdv(X_train, y_train, target_col="TTNS", n_samples=2400, random_state=42)
+    X_val, y_val = augment_with_sdv(X_val, y_val, target_col="TTNS", n_samples=800, random_state=42)
+    X_test, y_test = augment_with_sdv(X_test, y_test, target_col="TTNS", n_samples=800, random_state=42)
 #Normalization Using Standard Scalar 
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
