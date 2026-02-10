@@ -71,17 +71,29 @@ def preprocess_data(filtered_time, data_orig):
    #y = TTNS["time_to_next_ev_hr"] *3600  
 
 #Training on subsets: First two years 
-    X = known_next_slips[feature_cols][:575]
-    y = TTNS["time_to_next_ev_hr"][:575] * 3600
+    #X = known_next_slips[feature_cols][:575]
+    #y = TTNS["time_to_next_ev_hr"][:575] * 3600
 
 #Last two years 
     #X = known_next_slips[feature_cols][4497:]
     #y = TTNS["time_to_next_ev_hr"][4497:] *3600
 
 #Without the first two yeas and the last two years
-   # X = known_next_slips[feature_cols][575:4497]
-   # y = TTNS["time_to_next_ev_hr"][575:4497] *3600
+    X = known_next_slips[feature_cols][575:4497]
+    y = TTNS["time_to_next_ev_hr"][575:4497] *3600
 
+    #Sampling the subset to check if improved results are likely sample size dependent by taking the middle 575 events in the subset w/o the first and last two years 
+    length = 4497-575
+    mid = (575+length) // 2
+    half = 575//2
+    mid_start = mid-half 
+    mid_end= mid_start + 575
+    X=known_next_slips[feature_cols][mid_start:mid_end]
+    y = TTNS["time_to_next_ev_hr"][mid_start:mid_end] *3600
+    print("X Length",len(X))
+    print("Y Length", len(y))
+    print(X.head())
+    print(y.head())
 #Everything except last two years 
     #X = known_next_slips[feature_cols][:4497]
     #y = TTNS["time_to_next_ev_hr"][:4497] *3600
