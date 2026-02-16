@@ -11,7 +11,7 @@ from sdv.metadata import SingleTableMetadata
 
 
 
-def augment_with_sdv(X, y, target_col, n_samples, random_state=42):
+'''def augment_with_sdv(X, y, target_col, n_samples, random_state=42):
     """Generate synthetic training samples using SDV's GaussianCopulaSynthesizer.
 
     Fits a copula model on the joint distribution of features + target,
@@ -41,7 +41,7 @@ def augment_with_sdv(X, y, target_col, n_samples, random_state=42):
     print(np.max(X_aug))
     print(np.max(y_aug))
 
-    return X_aug, y_aug, 
+    return X_aug, y_aug, '''
 
 
  
@@ -57,8 +57,8 @@ def preprocess_data(filtered_time, data_orig):
     #known_next_slips = data_orig[filter_mask.shift(1) & filter_mask][:-1] 
     known_next_slips = data_orig[filter_mask.shift(1) &  filter_mask & filter_mask.shift(-1)][1:-1]
     amount_of_known = known_next_slips.shape
-    print(known_next_slips.shape)
-    print(data_orig.shape)
+    print("Next slips shape", known_next_slips.shape)
+    print("orig shape", data_orig.shape)
 
 
 #Target column creation and and converting all times into seconds 
@@ -67,23 +67,23 @@ def preprocess_data(filtered_time, data_orig):
     feature_cols = ["tide_deriv", "form_fac", "time_since", "slip_size", "high_t_evt", "tide_height"]
     known_next_slips["time_since"] *= 60
 
-   #X = known_next_slips[feature_cols] 
-   #y = TTNS["time_to_next_ev_hr"] *3600  
+    #X = known_next_slips[feature_cols] 
+    #y = TTNS["time_to_next_ev_hr"] *3600  
 
 #Training on subsets: First two years 
-    #X = known_next_slips[feature_cols][:575]
-    #y = TTNS["time_to_next_ev_hr"][:575] * 3600
+    X = known_next_slips[feature_cols][:575]
+    y = TTNS["time_to_next_ev_hr"][:575] * 3600
 
 #Last two years 
     #X = known_next_slips[feature_cols][4497:]
     #y = TTNS["time_to_next_ev_hr"][4497:] *3600
 
 #Without the first two yeas and the last two years
-    X = known_next_slips[feature_cols][575:4497]
-    y = TTNS["time_to_next_ev_hr"][575:4497] *3600
+    #X = known_next_slips[feature_cols][575:4497]
+    #y = TTNS["time_to_next_ev_hr"][575:4497] *3600
 
     #Sampling the subset to check if improved results are likely sample size dependent by taking the middle 575 events in the subset w/o the first and last two years 
-    length = 4497-575
+    '''length = 4497-575
     mid = (575+length) // 2
     half = 575//2
     mid_start = mid-half 
@@ -93,7 +93,7 @@ def preprocess_data(filtered_time, data_orig):
     print("X Length",len(X))
     print("Y Length", len(y))
     print(X.head())
-    print(y.head())
+    print(y.head())'''
 #Everything except last two years 
     #X = known_next_slips[feature_cols][:4497]
     #y = TTNS["time_to_next_ev_hr"][:4497] *3600
@@ -116,10 +116,10 @@ def preprocess_data(filtered_time, data_orig):
     #X_test, y_test = augment_with_sdv(X_test, y_test, target_col="TTNS", n_samples=800, random_state=42)
 
     # 13 Times Original Size 
-    X_train, y_train = augment_with_sdv(X_train, y_train, target_col="TTNS", n_samples=4800, random_state=42)
+    '''X_train, y_train = augment_with_sdv(X_train, y_train, target_col="TTNS", n_samples=4800, random_state=42)
     X_val, y_val = augment_with_sdv(X_val, y_val, target_col="TTNS", n_samples=1600, random_state=42)
     X_test, y_test = augment_with_sdv(X_test, y_test, target_col="TTNS", n_samples=1600, random_state=42)
-#Normalization Using Standard Scalar 
+#Normalization Using Standard Scalar '''
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_val = scaler.transform(X_val)
