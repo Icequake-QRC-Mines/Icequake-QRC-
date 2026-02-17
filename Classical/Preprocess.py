@@ -67,12 +67,12 @@ def preprocess_data(filtered_time, data_orig):
     feature_cols = ["tide_deriv", "form_fac", "time_since", "slip_size", "high_t_evt", "tide_height"]
     known_next_slips["time_since"] *= 60
 
-    #X = known_next_slips[feature_cols] 
-    #y = TTNS["time_to_next_ev_hr"] *3600  
+    X = known_next_slips[feature_cols] 
+    y = TTNS["time_to_next_ev_hr"] *3600  
 
 #Training on subsets: First two years 
-    X = known_next_slips[feature_cols][:575]
-    y = TTNS["time_to_next_ev_hr"][:575] * 3600
+    #X = known_next_slips[feature_cols][:575]
+    #y = TTNS["time_to_next_ev_hr"][:575] * 3600
 
 #Last two years 
     #X = known_next_slips[feature_cols][4497:]
