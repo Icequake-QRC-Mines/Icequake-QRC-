@@ -49,4 +49,5 @@ def preprocess_data(filtered_time, data_orig):
     X_val = scaler.transform(X_val)
     X_test = scaler.transform(X_test)
     
+    #return X_train, X_val, X_test, y_train, y_val, y_test, feature_cols, amount_of_known, X, y 
     return X_train, X_val, X_test, y_train, y_val, y_test, feature_cols, amount_of_known
