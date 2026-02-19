@@ -9,6 +9,7 @@ from sdv.single_table import GaussianCopulaSynthesizer
 from sdv.metadata import SingleTableMetadata
  
 
+
 def preprocess_data(filtered_time, data_orig):
     filter_mask = filtered_time["time_to_next_ev_hr"] != -1 #looking at column 2 of the time filtered data and keeping only the rows that are not -1
     print(filter_mask)
@@ -39,6 +40,7 @@ def preprocess_data(filtered_time, data_orig):
     X = X.loc[valid]
     y = y.loc[valid]
 
+
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
 
     X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.25, random_state=1) 
@@ -49,5 +51,5 @@ def preprocess_data(filtered_time, data_orig):
     X_val = scaler.transform(X_val)
     X_test = scaler.transform(X_test)
     
-    #return X_train, X_val, X_test, y_train, y_val, y_test, feature_cols, amount_of_known, X, y 
+
     return X_train, X_val, X_test, y_train, y_val, y_test, feature_cols, amount_of_known
