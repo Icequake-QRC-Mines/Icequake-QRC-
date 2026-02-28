@@ -120,9 +120,9 @@ def preprocess_data(filtered_time, data_orig):
     X_val, y_val = augment_with_sdv(X_val, y_val, target_col="TTNS", n_samples=1600, random_state=42)
     X_test, y_test = augment_with_sdv(X_test, y_test, target_col="TTNS", n_samples=1600, random_state=42)
 #Normalization Using Standard Scalar '''
-    scaler = StandardScaler()
+    '''scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_val = scaler.transform(X_val)
-    X_test = scaler.transform(X_test)
+    X_test = scaler.transform(X_test)'''
     
     return X_train, X_val, X_test, y_train, y_val, y_test, feature_cols, amount_of_known
