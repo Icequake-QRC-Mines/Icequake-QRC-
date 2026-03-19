@@ -51,6 +51,13 @@ def preprocess_data_window(filtered_time, data_orig, n_previous_events, random_s
         base_mask &= base_mask.shift(i) # this is checking events n-1, n-2, n-3, ... to see if they are valid
     filter_mask &= base_mask.shift(-1) # this is checking the event n+1 to see if it is valid
     filter_mask.fillna(False, inplace=True)
+    '''
+    base_mask = filtered_time["time_to_next_ev_hr"] != -1
+
+    # Only require the current event and the next event to be valid
+    filter_mask = base_mask & base_mask.shift(-1)
+
+    filter_mask.fillna(False, inplace=True)'''
 
     feature_cols = ["tide_deriv", "form_fac", "time_since", "slip_size", "high_t_evt", "tide_height"]
     X = data_orig[feature_cols].copy()
@@ -159,11 +166,11 @@ def preprocess_data(filtered_time, data_orig):
     # 13 Times Original Size 
     '''X_train, y_train = augment_with_sdv(X_train, y_train, target_col="TTNS", n_samples=4800, random_state=42)
     X_val, y_val = augment_with_sdv(X_val, y_val, target_col="TTNS", n_samples=1600, random_state=42)
-    X_test, y_test = augment_with_sdv(X_test, y_test, target_col="TTNS", n_samples=1600, random_state=42)
-#Normalization Using Standard Scalar '''
-    '''scaler = StandardScaler()
+    X_test, y_test = augment_with_sdv(X_test, y_test, target_col="TTNS", n_samples=1600, random_state=42)'''
+#Normalization Using Standard Scalar 
+    scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_val = scaler.transform(X_val)
-    X_test = scaler.transform(X_test)'''
+    X_test = scaler.transform(X_test)
     
     return X_train.to_numpy(), X_val.to_numpy(), X_test.to_numpy(), y_train.to_numpy(), y_val.to_numpy(), y_test.to_numpy(), feature_cols, amount_of_known
