@@ -1,0 +1,8 @@
+numpy
+pandas
+scikit-learn
+optuna
+xgboost
+qiskit
+qiskit-aer
+qiskit-ibm-runtime
