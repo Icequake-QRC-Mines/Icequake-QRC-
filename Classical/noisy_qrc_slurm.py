@@ -17,7 +17,7 @@ import pickle
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import optuna
@@ -27,7 +27,7 @@ from qiskit.circuit import Parameter
 from qiskit.transpiler import PassManager
 from qiskit_aer import AerSimulator
 from qiskit_aer.noise import NoiseModel
-from qiskit_ibm_runtime.fake_provider import FakeSherbrooke
+from qiskit_ibm_runtime.fake_provider import FakeFez, FakeSherbrooke
 from sklearn.metrics import accuracy_score, mean_absolute_error, r2_score, root_mean_squared_error
 from sklearn.utils.class_weight import compute_sample_weight
 from xgboost import XGBClassifier, XGBRegressor
@@ -72,6 +72,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-memory-mb", type=int, default=None, help="Aer max_memory_mb override")
     parser.add_argument("--aggregate", action="store_true")
     parser.add_argument("--estimate-only", action="store_true")
+    parser.add_argument(
+        "--estimate-json",
+        type=Path,
+        default=None,
+        help="Optional path to write structured estimate JSON.",
+    )
+    parser.add_argument(
+        "--estimate-sweep-fracs",
+        type=str,
+        default=None,
+        help="Comma-separated subset fractions for estimate sweep (e.g. 0.1,0.25,0.5,1.0).",
+    )
+    parser.add_argument(
+        "--estimate-plot",
+        type=Path,
+        default=None,
+        help="Optional output path for manuscript-ready estimate plot (png/pdf).",
+    )
     parser.add_argument("--task-id", type=int, default=None)
     parser.add_argument("--num-tasks", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
@@ -136,7 +154,7 @@ def build_parametric_reservoir_circuit(ising_params, num_layers: int, n_qubits: 
 
 
 def build_noisy_simulator(device: str, max_memory_mb: int | None):
-    fake_backend = FakeSherbrooke()
+    fake_backend = FakeFez()
     noise_model = NoiseModel.from_backend(fake_backend)
     sim_kwargs = {
         "noise_model": noise_model,
@@ -611,23 +629,246 @@ def aggregate_partials(args: argparse.Namespace, cfg: QRCConfig):
     print(f"Wrote hardware config -> {out_dir / 'hardware_config.pkl'}")
 
 
-def print_estimate(cfg: QRCConfig, shots: int, subset_frac: float, device: str):
-    X_train_q, *_ = load_data(cfg, subset_frac)
-    rng = np.random.default_rng(cfg.random_seed)
-    angle_bank = [generate_ising_params(cfg.n_qubits, rng) for _ in range(cfg.n_previous_events + 1)]
-    backend, _, local_transpile = build_noisy_simulator(device, None)
-    rows = []
-    for event_idx in range(cfg.n_previous_events + 1):
-        template, _ = build_parametric_reservoir_circuit(angle_bank[event_idx], cfg.num_layers_per_event, cfg.n_qubits)
-        isa = local_transpile(template)
-        rows.append(estimate_resources(isa, backend, shots, len(X_train_q)))
-    print("=== Noisy Simulation Resource Estimate ===")
-    for i, r in enumerate(rows, start=1):
-        print(
-            f"Event {i:02d} | depth={int(r['depth'])} ecr={int(r['ecr_gates'])} total={int(r['total_gates'])} "
-            f"est_qpu_equiv_s={r['est_qpu_seconds']:.2f}"
+def parse_fraction_sweep_arg(raw: str | None, default_frac: float) -> List[float]:
+    if raw is None or not raw.strip():
+        fracs = [default_frac]
+    else:
+        fracs = []
+        for token in raw.split(","):
+            tok = token.strip()
+            if not tok:
+                continue
+            fracs.append(float(tok))
+        if not fracs:
+            fracs = [default_frac]
+    clean = sorted(set(fracs))
+    for frac in clean:
+        if not (0.0 < frac <= 1.0):
+            raise ValueError(f"Invalid fraction {frac}. Fractions must satisfy 0 < frac <= 1.")
+    return clean
+
+
+def _compute_estimate(
+    cfg: QRCConfig,
+    shots: int,
+    subset_frac: float,
+    backend,
+    local_transpile,
+) -> Dict[str, Any]:
+    X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, *_ = load_data(cfg, subset_frac)
+    clf = train_classifier(X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, cfg.short_threshold)
+    clf_test_labels = clf.predict(X_test_q)
+
+    short_mask_train = y_train < cfg.short_threshold
+    long_mask_train = ~short_mask_train
+    short_mask_val = y_val < cfg.short_threshold
+    long_mask_val = ~short_mask_val
+    short_test_idx = np.where(clf_test_labels == 0)[0]
+    long_test_idx = np.where(clf_test_labels == 1)[0]
+
+    regime_sizes = {
+        "short": {
+            "train": int(np.sum(short_mask_train)),
+            "val": int(np.sum(short_mask_val)),
+            "test": int(len(short_test_idx)),
+        },
+        "long": {
+            "train": int(np.sum(long_mask_train)),
+            "val": int(np.sum(long_mask_val)),
+            "test": int(len(long_test_idx)),
+        },
+    }
+
+    # Noisy path measures Z, X, and Y bases separately (ZZ comes from Z counts),
+    # so each binding incurs 3 circuit executions.
+    basis_multiplier = 3
+
+    n_events = cfg.n_previous_events + 1
+    grand_total = 0.0
+    total_circuit_executions = 0
+    per_iteration = []
+
+    for iter_idx in range(cfg.n_iterations):
+        iter_total = 0.0
+        iter_execs = 0
+        iter_regime_breakdown = {}
+        for regime in ("short", "long"):
+            rng = np.random.default_rng(cfg.random_seed + iter_idx + (0 if regime == "short" else 10_000))
+            angle_bank = [generate_ising_params(cfg.n_qubits, rng) for _ in range(n_events)]
+            n_bindings = (
+                regime_sizes[regime]["train"] + regime_sizes[regime]["val"] + regime_sizes[regime]["test"]
+            ) * basis_multiplier
+            regime_total = 0.0
+            for event_idx in range(n_events):
+                template, _ = build_parametric_reservoir_circuit(
+                    angle_bank[event_idx], cfg.num_layers_per_event, cfg.n_qubits
+                )
+                isa = local_transpile(template)
+                row = estimate_resources(isa, backend, shots, n_bindings)
+                regime_total += row["est_qpu_seconds"]
+                iter_execs += n_bindings
+            iter_regime_breakdown[regime] = regime_total
+            iter_total += regime_total
+        per_iteration.append(
+            {
+                "iteration": iter_idx,
+                "short_est_qpu_equiv_seconds": float(iter_regime_breakdown["short"]),
+                "long_est_qpu_equiv_seconds": float(iter_regime_breakdown["long"]),
+                "iteration_est_qpu_equiv_seconds": float(iter_total),
+                "iteration_circuit_executions": int(iter_execs),
+            }
         )
-    print(f"Total est seconds across events: {sum(r['est_qpu_seconds'] for r in rows):.2f}")
+        total_circuit_executions += iter_execs
+        grand_total += iter_total
+
+    return {
+        "subset_frac": float(subset_frac),
+        "shots": int(shots),
+        "iterations": int(cfg.n_iterations),
+        "events_per_regime": int(n_events),
+        "basis_multiplier": int(basis_multiplier),
+        "regime_sizes": regime_sizes,
+        "per_iteration": per_iteration,
+        "total_circuit_executions": int(total_circuit_executions),
+        "grand_total_est_qpu_equiv_seconds": float(grand_total),
+    }
+
+
+def save_estimate_plot(estimates: List[Dict[str, Any]], output_path: Path) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        raise RuntimeError("matplotlib is required for --estimate-plot output.") from exc
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    xs = [e["subset_frac"] for e in estimates]
+    ys_minutes = [max(e["grand_total_est_qpu_equiv_seconds"] / 60.0, 1e-12) for e in estimates]
+    ys_circuits = [max(float(e["total_circuit_executions"]), 1.0) for e in estimates]
+
+    fig, ax1 = plt.subplots(figsize=(9.2, 5.4))
+    line1 = ax1.plot(
+        xs,
+        ys_minutes,
+        marker="o",
+        markersize=7,
+        markeredgecolor="white",
+        markeredgewidth=0.8,
+        linewidth=2.2,
+        color="#1f77b4",
+        label="Est. QPU-equivalent minutes",
+    )
+    ax1.set_yscale("log")
+    ax1.set_xlabel("Fraction of events/circuits used")
+    ax1.set_ylabel("Estimated QPU-equivalent runtime (log minutes)", color="#1f77b4")
+    ax1.tick_params(axis="y", labelcolor="#1f77b4")
+    ax1.grid(True, linestyle="--", alpha=0.3)
+
+    ax2 = ax1.twinx()
+    line2 = ax2.plot(
+        xs,
+        ys_circuits,
+        marker="s",
+        markersize=6.5,
+        markeredgecolor="white",
+        markeredgewidth=0.8,
+        linewidth=2.0,
+        color="#d62728",
+        label="Circuit executions",
+    )
+    ax2.set_yscale("log")
+    ax2.set_ylabel("Total circuit executions (log scale)", color="#d62728")
+    ax2.tick_params(axis="y", labelcolor="#d62728")
+
+    # Annotate each marker with exact values for manuscript readability.
+    for x, y in zip(xs, ys_minutes):
+        ax1.annotate(
+            f"{y:.1f}m",
+            (x, y),
+            textcoords="offset points",
+            xytext=(0, 8),
+            ha="center",
+            color="#1f77b4",
+            fontsize=8,
+            bbox={"boxstyle": "round,pad=0.15", "fc": "white", "ec": "none", "alpha": 0.75},
+        )
+    for x, y in zip(xs, ys_circuits):
+        ax2.annotate(
+            f"{int(y):,}",
+            (x, y),
+            textcoords="offset points",
+            xytext=(0, -12),
+            ha="center",
+            color="#d62728",
+            fontsize=8,
+            bbox={"boxstyle": "round,pad=0.15", "fc": "white", "ec": "none", "alpha": 0.75},
+        )
+
+    lines = line1 + line2
+    labels = [line.get_label() for line in lines]
+    ax1.legend(lines, labels, loc="upper left", frameon=True)
+    ax1.set_title("Estimated Hardware Workload vs Subset Fraction")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=350, bbox_inches="tight")
+    plt.close(fig)
+
+
+def print_estimate(
+    cfg: QRCConfig,
+    shots: int,
+    subset_frac: float,
+    device: str,
+    estimate_json: Path | None = None,
+    estimate_sweep_fracs: str | None = None,
+    estimate_plot: Path | None = None,
+):
+    fractions = parse_fraction_sweep_arg(estimate_sweep_fracs, subset_frac)
+    backend, _, local_transpile = build_noisy_simulator(device, None)
+    estimates = []
+
+    print("=== Noisy Simulation Resource Estimate (Full Config) ===")
+    print(
+        f"iterations={cfg.n_iterations} | events_per_regime={cfg.n_previous_events + 1} | shots={shots} "
+        f"| basis_multiplier=3"
+    )
+    for frac in fractions:
+        estimate = _compute_estimate(cfg, shots, frac, backend, local_transpile)
+        estimates.append(estimate)
+        regime_sizes = estimate["regime_sizes"]
+        print(
+            f"\nsubset_frac={frac:.4f} | "
+            f"short(train={regime_sizes['short']['train']}, val={regime_sizes['short']['val']}, test={regime_sizes['short']['test']}), "
+            f"long(train={regime_sizes['long']['train']}, val={regime_sizes['long']['val']}, test={regime_sizes['long']['test']})"
+        )
+        for row in estimate["per_iteration"]:
+            print(
+                f"Iteration {row['iteration']:02d} | short={row['short_est_qpu_equiv_seconds']:.2f}s "
+                f"long={row['long_est_qpu_equiv_seconds']:.2f}s "
+                f"total={row['iteration_est_qpu_equiv_seconds']:.2f}s"
+            )
+        print(
+            f"subset_frac={frac:.4f} totals | est_qpu_equiv_s={estimate['grand_total_est_qpu_equiv_seconds']:.2f} "
+            f"| circuit_executions={estimate['total_circuit_executions']}"
+        )
+
+    if estimate_json is not None:
+        payload = {
+            "config": {
+                "shots": shots,
+                "device": device,
+                "n_iterations": cfg.n_iterations,
+                "n_qubits": cfg.n_qubits,
+                "n_previous_events": cfg.n_previous_events,
+                "num_layers_per_event": cfg.num_layers_per_event,
+            },
+            "fractions": fractions,
+            "estimates": estimates,
+        }
+        save_json(estimate_json, payload)
+        print(f"Wrote estimate JSON -> {estimate_json}")
+
+    if estimate_plot is not None:
+        save_estimate_plot(estimates, estimate_plot)
+        print(f"Wrote estimate plot -> {estimate_plot}")
 
 
 def main():
@@ -642,7 +883,15 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.estimate_only:
-        print_estimate(cfg, args.shots, args.subset_frac, args.device)
+        print_estimate(
+            cfg,
+            args.shots,
+            args.subset_frac,
+            args.device,
+            estimate_json=args.estimate_json,
+            estimate_sweep_fracs=args.estimate_sweep_fracs,
+            estimate_plot=args.estimate_plot,
+        )
         return
 
     if args.task_id is not None:

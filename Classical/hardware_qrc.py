@@ -37,6 +37,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("Classical/results/hardware_qrc_run"))
     parser.add_argument("--backend", type=str, default="ibm_sherbrooke")
     parser.add_argument("--shots", type=int, default=None, help="Override shots from config")
+    parser.add_argument(
+        "--subset-frac",
+        type=float,
+        default=1.0,
+        help="Fraction of train/val/test rows to use for hardware run (0 < frac <= 1).",
+    )
+    parser.add_argument(
+        "--subset-seed",
+        type=int,
+        default=None,
+        help="Seed for subset sampling. Defaults to pipeline random_seed.",
+    )
     parser.add_argument("--estimate-only", action="store_true")
     parser.add_argument("--no-confirm", action="store_true")
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
@@ -71,6 +83,23 @@ def load_data_with_scaling(config_payload):
     X_val_q = scale_with_params(X_val.to_numpy(), train_min, train_max)
     X_test_q = scale_with_params(X_test.to_numpy(), train_min, train_max)
     return X_train_q, X_val_q, X_test_q, y_train.to_numpy(), y_val.to_numpy(), y_test.to_numpy()
+
+
+def maybe_subset_split(
+    X: np.ndarray,
+    y: np.ndarray,
+    frac: float,
+    rng: np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if frac >= 1.0:
+        return X, y
+    n = len(X)
+    if n == 0:
+        return X, y
+    keep = max(1, int(n * frac))
+    idx = rng.choice(n, size=keep, replace=False)
+    idx.sort()
+    return X[idx], y[idx]
 
 
 def trotter_ising_layer(qc: QuantumCircuit, n_qubits: int, J: np.ndarray, h: float, t: float, n_trotter_steps: int = 3) -> None:
@@ -191,6 +220,8 @@ def run_estimator_for_dataset(
     n_total_events = X_data.shape[1] // n_qubits
     n_obs = 4 * n_qubits
     pauli_matrix = np.zeros((len(X_data), n_total_events * n_obs))
+    if len(X_data) == 0:
+        return pauli_matrix, []
     observables = build_observables(n_qubits)
     resources = []
 
@@ -208,12 +239,14 @@ def run_estimator_for_dataset(
 
         start_col = event_idx * n_qubits
         X_event = X_data[:, start_col : start_col + n_qubits]
-        param_values = [row.tolist() for row in X_event]
-        pub = (isa_circuit, isa_observables, param_values)
-        job = estimator.run([pub], precision=None)
-        res = job.result()[0]
-        # res.data.evs has shape (n_bindings, n_observables)
-        evs = np.asarray(res.data.evs)
+        # EstimatorV2 expects observables and parameter-values shapes to be broadcastable.
+        # Submit one pub per observable to avoid (n_obs,) vs (n_bindings,) mismatch.
+        param_values = np.asarray(X_event, dtype=float)
+        pubs = [(isa_circuit, obs, param_values) for obs in isa_observables]
+        job = estimator.run(pubs, precision=None)
+        results = job.result()
+        # Each pub yields shape (n_bindings,); stack to (n_bindings, n_observables).
+        evs = np.column_stack([np.asarray(r.data.evs) for r in results])
         usage_estimation = getattr(job, "usage_estimation", None)
         if usage_estimation is not None:
             resources[-1]["runtime_usage_estimation"] = usage_estimation
@@ -244,6 +277,8 @@ def save_json(path: Path, payload):
 
 def main():
     args = parse_args()
+    if not (0.0 < args.subset_frac <= 1.0):
+        raise ValueError("--subset-frac must satisfy 0 < subset-frac <= 1.")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.checkpoint_dir is None:
         args.checkpoint_dir = args.output_dir / "checkpoints"
@@ -260,6 +295,12 @@ def main():
     short_threshold = cfg_bundle["short_threshold"]
 
     X_train_q, X_val_q, X_test_q, y_train, y_val, y_test = load_data_with_scaling(cfg_bundle)
+    subset_seed = args.subset_seed if args.subset_seed is not None else pipeline_cfg["random_seed"]
+    subset_rng = np.random.default_rng(subset_seed)
+    X_train_q, y_train = maybe_subset_split(X_train_q, y_train, args.subset_frac, subset_rng)
+    X_val_q, y_val = maybe_subset_split(X_val_q, y_val, args.subset_frac, subset_rng)
+    X_test_q, y_test = maybe_subset_split(X_test_q, y_test, args.subset_frac, subset_rng)
+
     clf = cfg_bundle["regime_classifier"]
     clf_val_labels = clf.predict(X_val_q)
     clf_test_labels = clf.predict(X_test_q)
@@ -271,6 +312,11 @@ def main():
     long_val_idx = np.where(clf_val_labels == 1)[0]
     short_test_idx = np.where(clf_test_labels == 0)[0]
     long_test_idx = np.where(clf_test_labels == 1)[0]
+    if not np.any(short_mask_train) or not np.any(long_mask_train):
+        raise ValueError(
+            "Subset selection produced an empty short or long training regime. "
+            "Increase --subset-frac or adjust --subset-seed."
+        )
 
     service = QiskitRuntimeService()
     backend = service.backend(args.backend)
@@ -292,7 +338,10 @@ def main():
 
     if not args.no_confirm:
         print("About to submit quantum jobs to IBM Runtime.")
-        print(f"Backend={args.backend} | shots={shots} | top_k={len(cfg_bundle['top_k_indices'])}")
+        print(
+            f"Backend={args.backend} | shots={shots} | top_k={len(cfg_bundle['top_k_indices'])} "
+            f"| subset_frac={args.subset_frac}"
+        )
         confirm = input("Continue? [y/N]: ").strip().lower()
         if confirm not in {"y", "yes"}:
             print("Aborted.")
@@ -440,6 +489,8 @@ def main():
     summary = {
         "backend": args.backend,
         "shots": shots,
+        "subset_frac": args.subset_frac,
+        "subset_seed": subset_seed,
         "iterations_run": [int(i) for i in cfg_bundle["top_k_indices"]],
         "ensemble_test_mae": float(mean_absolute_error(y_test, ensemble_pred)),
         "ensemble_test_rmse": float(root_mean_squared_error(y_test, ensemble_pred)),
