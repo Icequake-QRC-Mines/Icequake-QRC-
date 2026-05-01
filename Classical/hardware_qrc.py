@@ -10,8 +10,9 @@ from __future__ import annotations
 import argparse
 import json
 import pickle
+import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -29,6 +30,24 @@ try:
     from qiskit.transpiler.passes import ResourceEstimation
 except Exception:
     ResourceEstimation = None
+
+try:
+    from qiskit.transpiler.passes import ALAPScheduleAnalysis
+except Exception:
+    ALAPScheduleAnalysis = None
+
+try:
+    from qiskit.transpiler.passes import PadDelay
+except Exception:
+    PadDelay = None
+
+
+# Per-sub-job fixed overhead (IBM Runtime accounting). Applied once per pub.
+SUBJOB_OVERHEAD_S = 2.0
+# Extra QPU time for TREX / measurement-mitigation calibrations (resilience_level >= 1).
+RESILIENCE_CALIBRATION_S = 2.0
+# Gap between shots on IBM hardware.
+REP_DELAY_S = 250e-6
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +69,11 @@ def parse_args() -> argparse.Namespace:
         help="Seed for subset sampling. Defaults to pipeline random_seed.",
     )
     parser.add_argument("--estimate-only", action="store_true")
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="Submit a single pub to IBM Runtime, print job.usage_estimation, cancel, then exit.",
+    )
     parser.add_argument("--no-confirm", action="store_true")
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
     return parser.parse_args()
@@ -150,7 +174,24 @@ def build_observables(n_qubits: int) -> List[SparsePauliOp]:
     return observables
 
 
-def estimate_resources(isa_circuit: QuantumCircuit, backend, shots: int, n_bindings: int) -> Dict[str, float]:
+def count_qwc_groups(observables: List[SparsePauliOp]) -> int:
+    """Number of qubit-wise-commuting groups — equal to EstimatorV2's hardware sub-jobs per pub."""
+    if not observables:
+        return 0
+    n_qubits = observables[0].num_qubits
+    pauli_list = [(op.paulis[0].to_label(), 1.0) for op in observables]
+    combined = SparsePauliOp.from_list(pauli_list, num_qubits=n_qubits)
+    return len(combined.group_commuting(qubit_wise=True))
+
+
+def estimate_resources(
+    isa_circuit: QuantumCircuit,
+    backend,
+    shots: int,
+    n_bindings: int,
+    n_subjobs: int = 1,
+    resilience_level: int = 0,
+) -> Dict[str, float]:
     ops = isa_circuit.count_ops()
     depth = float(isa_circuit.depth())
     size = float(sum(ops.values()))
@@ -167,8 +208,29 @@ def estimate_resources(isa_circuit: QuantumCircuit, backend, shots: int, n_bindi
         except Exception:
             pass
 
+    # Schedule the circuit before asking for a duration estimate so idle windows
+    # (from gate parallelism on the coupling map) are counted, not just summed gate times.
+    scheduled_circuit = isa_circuit
+    if ALAPScheduleAnalysis is not None:
+        try:
+            passes = [ALAPScheduleAnalysis(target=backend.target)]
+            if PadDelay is not None:
+                try:
+                    passes.append(PadDelay(target=backend.target))
+                except Exception:
+                    pass
+            sched_pm = PassManager(passes)
+            scheduled_circuit = sched_pm.run(isa_circuit)
+        except Exception:
+            scheduled_circuit = isa_circuit
+
     total_duration = None
-    if hasattr(isa_circuit, "estimate_duration"):
+    if hasattr(scheduled_circuit, "estimate_duration"):
+        try:
+            total_duration = float(scheduled_circuit.estimate_duration(target=backend.target, unit="s"))
+        except Exception:
+            total_duration = None
+    if total_duration is None and hasattr(isa_circuit, "estimate_duration"):
         try:
             total_duration = float(isa_circuit.estimate_duration(target=backend.target, unit="s"))
         except Exception:
@@ -183,79 +245,137 @@ def estimate_resources(isa_circuit: QuantumCircuit, backend, shots: int, n_bindi
             if props and props.duration:
                 total_duration += props.duration
 
-    rep_delay = 250e-6
-    qpu_seconds = (total_duration + rep_delay) * shots * n_bindings
+    # IBM Runtime cost model: overhead + (rep_delay + circuit_len) * num_executions, per sub-job.
+    per_subjob_wall = SUBJOB_OVERHEAD_S + (total_duration + REP_DELAY_S) * shots * n_bindings
+    qpu_seconds = n_subjobs * per_subjob_wall
+    if resilience_level >= 1:
+        qpu_seconds += RESILIENCE_CALIBRATION_S * n_subjobs
+
     return {
         "depth": depth,
         "total_gates": size,
         "ecr_gates": float(ops.get("ecr", 0)),
         "estimated_circuit_seconds": float(total_duration),
-        "est_qpu_seconds": qpu_seconds,
+        "n_subjobs": int(n_subjobs),
+        "n_bindings": int(n_bindings),
+        "shots": int(shots),
+        "resilience_level": int(resilience_level),
+        "est_qpu_seconds": float(qpu_seconds),
     }
 
 
-def print_resource_report(resource_rows, backend_name: str):
+def print_resource_report(resource_rows: List[Dict], backend_name: str) -> float:
+    """Print per-(iteration, dataset) subtotals and a single grand total.
+
+    Returns the aggregate QPU-seconds across all rows.
+    """
     print(f"=== Resource Estimation for {backend_name} ===")
-    total = 0.0
-    for idx, row in enumerate(resource_rows, start=1):
-        total += row["est_qpu_seconds"]
-        print(
-            f"Event {idx:02d} | depth={int(row['depth'])} ecr={int(row['ecr_gates'])} "
-            f"total={int(row['total_gates'])} est_qpu_s={row['est_qpu_seconds']:.2f}"
-        )
-    print(f"Estimated QPU-seconds for this circuit bundle: {total:.2f}")
+    grouped: Dict[Tuple, List[Dict]] = {}
+    order: List[Tuple] = []
+    for row in resource_rows:
+        key = (row.get("iteration", "-"), row.get("dataset", "-"))
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(row)
+
+    grand_total = 0.0
+    for key in order:
+        iter_id, dataset = key
+        rows = grouped[key]
+        subtotal = 0.0
+        print(f"--- iter={iter_id} dataset={dataset} ---")
+        for row in rows:
+            ev = row.get("event", "?")
+            subtotal += row["est_qpu_seconds"]
+            print(
+                f"  event={ev} depth={int(row['depth'])} ecr={int(row['ecr_gates'])} "
+                f"total={int(row['total_gates'])} subjobs={int(row['n_subjobs'])} "
+                f"bindings={int(row.get('n_bindings', 0))} est_qpu_s={row['est_qpu_seconds']:.2f}"
+            )
+        print(f"  subtotal: {subtotal:.2f} s")
+        grand_total += subtotal
+
+    print(f"Aggregate estimated QPU-seconds: {grand_total:.2f}")
+    return grand_total
 
 
-def run_estimator_for_dataset(
+def build_pubs_for_dataset(
     X_data: np.ndarray,
     angle_bank,
-    estimator: EstimatorV2,
     pm,
     backend,
     n_qubits: int,
     num_layers: int,
     shots: int,
-    checkpoint_prefix: Path | None = None,
+    resilience_level: int,
+    iter_idx: int,
+    dataset_key: str,
+    checkpoint_dir: Optional[Path],
 ):
+    """Build pubs + metadata for one dataset without submitting.
+
+    Returns:
+        pauli_matrix   : (n_bindings, n_total_events * n_obs), pre-filled for
+                         any events restored from checkpoint.
+        pubs           : list of (isa_circuit, isa_obs, param_values) tuples.
+        pub_index      : parallel list of (dataset_key, event_idx, obs_idx, n_bindings).
+        resources      : per-event resource rows (with iteration/dataset/event keys).
+        fresh_events   : set of event_idx values built this run (for post-submit checkpointing).
+    """
     n_total_events = X_data.shape[1] // n_qubits
     n_obs = 4 * n_qubits
     pauli_matrix = np.zeros((len(X_data), n_total_events * n_obs))
+    pubs: List = []
+    pub_index: List = []
+    resources: List = []
+    fresh_events: set = set()
+
     if len(X_data) == 0:
-        return pauli_matrix, []
+        return pauli_matrix, pubs, pub_index, resources, fresh_events
+
     observables = build_observables(n_qubits)
-    resources = []
+    n_subjobs = count_qwc_groups(observables)
 
     for event_idx in range(n_total_events):
-        ckpt = None if checkpoint_prefix is None else checkpoint_prefix.with_name(f"{checkpoint_prefix.name}_event{event_idx}.npy")
-        if ckpt and ckpt.exists():
-            block = np.load(ckpt)
-            pauli_matrix[:, event_idx * n_obs : (event_idx + 1) * n_obs] = block
-            continue
+        ckpt = None
+        if checkpoint_dir is not None:
+            ckpt = checkpoint_dir / f"iter{iter_idx}_{dataset_key}_event{event_idx}.npy"
+            if ckpt.exists():
+                block = np.load(ckpt)
+                pauli_matrix[:, event_idx * n_obs : (event_idx + 1) * n_obs] = block
+                continue
 
-        template, params = build_parametric_reservoir_circuit(angle_bank[event_idx], num_layers, n_qubits)
+        template, _params = build_parametric_reservoir_circuit(angle_bank[event_idx], num_layers, n_qubits)
         isa_circuit = pm.run(template)
-        resources.append(estimate_resources(isa_circuit, backend, shots, len(X_data)))
-        isa_observables = [obs.apply_layout(isa_circuit.layout) for obs in observables]
+        res_row = estimate_resources(
+            isa_circuit,
+            backend,
+            shots,
+            len(X_data),
+            n_subjobs=n_subjobs,
+            resilience_level=resilience_level,
+        )
+        res_row.update({
+            "iteration": int(iter_idx),
+            "dataset": dataset_key,
+            "event": int(event_idx),
+        })
+        resources.append(res_row)
 
+        isa_observables = [obs.apply_layout(isa_circuit.layout) for obs in observables]
         start_col = event_idx * n_qubits
         X_event = X_data[:, start_col : start_col + n_qubits]
-        # EstimatorV2 expects observables and parameter-values shapes to be broadcastable.
-        # Submit one pub per observable to avoid (n_obs,) vs (n_bindings,) mismatch.
         param_values = np.asarray(X_event, dtype=float)
-        pubs = [(isa_circuit, obs, param_values) for obs in isa_observables]
-        job = estimator.run(pubs, precision=None)
-        results = job.result()
-        # Each pub yields shape (n_bindings,); stack to (n_bindings, n_observables).
-        evs = np.column_stack([np.asarray(r.data.evs) for r in results])
-        usage_estimation = getattr(job, "usage_estimation", None)
-        if usage_estimation is not None:
-            resources[-1]["runtime_usage_estimation"] = usage_estimation
-        pauli_matrix[:, event_idx * n_obs : (event_idx + 1) * n_obs] = evs
-        if ckpt:
-            np.save(ckpt, evs)
-        print(f"  Event {event_idx + 1}/{n_total_events} complete")
 
-    return pauli_matrix, resources
+        # Single pub per (dataset, event): observables array broadcasts against bindings.
+        # Shapes: obs (n_obs, 1), params (n_bindings, n_params) -> EstimatorV2 output (n_obs, n_bindings).
+        obs_array = np.array(isa_observables, dtype=object).reshape(-1, 1)
+        pubs.append((isa_circuit, obs_array, param_values))
+        pub_index.append((dataset_key, event_idx, len(X_data)))
+        fresh_events.add(event_idx)
+
+    return pauli_matrix, pubs, pub_index, resources, fresh_events
 
 
 def make_hybrid_features_decay(P_matrix: np.ndarray, n_total_events: int, n_obs: int, decay: float = 0.3):
@@ -273,6 +393,48 @@ def save_json(path: Path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+
+
+def run_probe(
+    cfg_bundle,
+    pipeline_cfg,
+    backend,
+    pm,
+    shots: int,
+    n_qubits: int,
+    X_sample: np.ndarray,
+):
+    """Submit one pub, read IBM's server-side job.usage_estimation, cancel, exit."""
+    if X_sample.shape[0] < 1:
+        raise ValueError("No data available for probe submission.")
+    example_iter = cfg_bundle["top_k_indices"][0]
+    angle_short = cfg_bundle["ising_params_per_iteration"][example_iter]["short"]
+    template, _ = build_parametric_reservoir_circuit(
+        angle_short[0], pipeline_cfg["num_layers_per_event"], n_qubits
+    )
+    isa_circuit = pm.run(template)
+    observables = build_observables(n_qubits)
+    isa_obs = observables[0].apply_layout(isa_circuit.layout)
+    param_values = np.asarray(X_sample[:1, 0:n_qubits], dtype=float)
+
+    print("Submitting probe pub to IBM Runtime (will cancel after reading usage_estimation)...")
+    with Batch(backend=backend) as _batch:
+        estimator = EstimatorV2()
+        estimator.options.default_shots = shots
+        estimator.options.resilience_level = 1
+        job = estimator.run([(isa_circuit, isa_obs, param_values)], precision=None)
+        usage = None
+        for _ in range(10):
+            usage = getattr(job, "usage_estimation", None)
+            if usage:
+                break
+            time.sleep(1)
+        print(f"IBM usage_estimation: {usage}")
+        try:
+            job.cancel()
+            print("Probe job cancelled.")
+        except Exception as exc:
+            print(f"Probe cancel raised: {exc}")
 
 
 def main():
@@ -293,6 +455,8 @@ def main():
     n_total_events = n_previous_events + 1
     n_obs = 4 * n_qubits
     short_threshold = cfg_bundle["short_threshold"]
+    # Keep in sync with estimator.options.resilience_level below.
+    resilience_level = 1
 
     X_train_q, X_val_q, X_test_q, y_train, y_val, y_test = load_data_with_scaling(cfg_bundle)
     subset_seed = args.subset_seed if args.subset_seed is not None else pipeline_cfg["random_seed"]
@@ -322,18 +486,49 @@ def main():
     backend = service.backend(args.backend)
     pm = generate_preset_pass_manager(backend=backend, optimization_level=3)
 
-    # Estimate mode uses first top-k iteration only for fast reporting.
+    if args.probe:
+        run_probe(cfg_bundle, pipeline_cfg, backend, pm, shots, n_qubits, X_train_q)
+        return
+
+    n_subjobs_per_event = count_qwc_groups(build_observables(n_qubits))
+
+    # Canonical (dataset_key, X, regime) specs used by both estimate-only and submission paths.
+    dataset_specs = [
+        ("short_train", X_train_q[short_mask_train], "short"),
+        ("short_val", X_val_q[short_mask_val], "short"),
+        ("short_test", X_test_q[short_test_idx], "short"),
+        ("long_train", X_train_q[long_mask_train], "long"),
+        ("long_val", X_val_q[long_mask_val], "long"),
+        ("long_test", X_test_q[long_test_idx], "long"),
+    ]
+
     if args.estimate_only:
-        example_iter = cfg_bundle["top_k_indices"][0]
-        angle_short = cfg_bundle["ising_params_per_iteration"][example_iter]["short"]
-        rows = []
-        for event_idx in range(n_total_events):
-            template, _ = build_parametric_reservoir_circuit(
-                angle_short[event_idx], pipeline_cfg["num_layers_per_event"], n_qubits
-            )
-            isa = pm.run(template)
-            rows.append(estimate_resources(isa, backend, shots, len(X_train_q)))
-        print_resource_report(rows, args.backend)
+        all_rows: List[Dict] = []
+        for iter_idx in cfg_bundle["top_k_indices"]:
+            for dataset_key, X_ds, regime in dataset_specs:
+                if len(X_ds) == 0:
+                    continue
+                angle_bank = cfg_bundle["ising_params_per_iteration"][iter_idx][regime]
+                for event_idx in range(n_total_events):
+                    template, _ = build_parametric_reservoir_circuit(
+                        angle_bank[event_idx], pipeline_cfg["num_layers_per_event"], n_qubits
+                    )
+                    isa = pm.run(template)
+                    row = estimate_resources(
+                        isa,
+                        backend,
+                        shots,
+                        len(X_ds),
+                        n_subjobs=n_subjobs_per_event,
+                        resilience_level=resilience_level,
+                    )
+                    row.update({
+                        "iteration": int(iter_idx),
+                        "dataset": dataset_key,
+                        "event": int(event_idx),
+                    })
+                    all_rows.append(row)
+        print_resource_report(all_rows, args.backend)
         return
 
     if not args.no_confirm:
@@ -347,85 +542,96 @@ def main():
             print("Aborted.")
             return
 
-    iter_results = []
+    iter_results: List[Dict] = []
     batch_usage = None
+    all_resource_rows: List[Dict] = []
+
     with Batch(backend=backend) as batch:
         estimator = EstimatorV2()
         estimator.options.default_shots = shots
-        estimator.options.resilience_level = 1
+        estimator.options.resilience_level = resilience_level
 
         for iter_idx in cfg_bundle["top_k_indices"]:
             print(f"\nRunning hardware iteration={iter_idx}")
             ising_short = cfg_bundle["ising_params_per_iteration"][iter_idx]["short"]
             ising_long = cfg_bundle["ising_params_per_iteration"][iter_idx]["long"]
+            angle_banks = {"short": ising_short, "long": ising_long}
 
-            P_tr_short, res_short = run_estimator_for_dataset(
-                X_train_q[short_mask_train],
-                ising_short,
-                estimator,
-                pm,
-                backend,
-                n_qubits,
-                pipeline_cfg["num_layers_per_event"],
-                shots,
-                checkpoint_prefix=args.checkpoint_dir / f"iter{iter_idx}_short_train",
+            # Collect pubs from all six datasets for this iteration into one submission.
+            pauli_matrices: Dict[str, np.ndarray] = {}
+            all_pubs: List = []
+            all_pub_index: List = []
+            fresh_by_dataset: Dict[str, set] = {}
+            iter_res_by_dataset: Dict[str, List[Dict]] = {}
+
+            for dataset_key, X_ds, regime in dataset_specs:
+                P, pubs, pub_index, res_rows, fresh = build_pubs_for_dataset(
+                    X_ds,
+                    angle_banks[regime],
+                    pm,
+                    backend,
+                    n_qubits,
+                    pipeline_cfg["num_layers_per_event"],
+                    shots,
+                    resilience_level,
+                    iter_idx,
+                    dataset_key,
+                    args.checkpoint_dir,
+                )
+                pauli_matrices[dataset_key] = P
+                all_pubs.extend(pubs)
+                all_pub_index.extend(pub_index)
+                fresh_by_dataset[dataset_key] = fresh
+                iter_res_by_dataset[dataset_key] = res_rows
+                all_resource_rows.extend(res_rows)
+
+            usage_estimation = None
+            if all_pubs:
+                print(f"  Submitting {len(all_pubs)} pubs in a single Runtime job...")
+                job = estimator.run(all_pubs, precision=None)
+                results = job.result()
+                usage_estimation = getattr(job, "usage_estimation", None)
+
+                # Deinterleave results back into per-dataset Pauli matrices.
+                # Each pub returns evs with shape (n_obs, n_bindings); transpose into (n_bindings, n_obs).
+                for pub_idx, (dataset_key, event_idx, _n_bindings) in enumerate(all_pub_index):
+                    r = results[pub_idx]
+                    evs = np.asarray(r.data.evs)
+                    if evs.ndim > 2:
+                        evs = evs.reshape(n_obs, -1)
+                    pauli_matrices[dataset_key][:, event_idx * n_obs : (event_idx + 1) * n_obs] = evs.T
+
+                # Persist per-event shards for any freshly-built (dataset, event) pairs.
+                for dataset_key, fresh in fresh_by_dataset.items():
+                    for event_idx in fresh:
+                        block = pauli_matrices[dataset_key][:, event_idx * n_obs : (event_idx + 1) * n_obs]
+                        ckpt = args.checkpoint_dir / f"iter{iter_idx}_{dataset_key}_event{event_idx}.npy"
+                        np.save(ckpt, block)
+            else:
+                print("  All events restored from checkpoint; no submission needed.")
+
+            if usage_estimation is not None:
+                for res_rows in iter_res_by_dataset.values():
+                    for row in res_rows:
+                        row["runtime_usage_estimation"] = usage_estimation
+
+            res_short = (
+                iter_res_by_dataset.get("short_train", [])
+                + iter_res_by_dataset.get("short_val", [])
+                + iter_res_by_dataset.get("short_test", [])
             )
-            P_vl_short, _ = run_estimator_for_dataset(
-                X_val_q[short_mask_val],
-                ising_short,
-                estimator,
-                pm,
-                backend,
-                n_qubits,
-                pipeline_cfg["num_layers_per_event"],
-                shots,
-                checkpoint_prefix=args.checkpoint_dir / f"iter{iter_idx}_short_val",
-            )
-            P_te_short, _ = run_estimator_for_dataset(
-                X_test_q[short_test_idx],
-                ising_short,
-                estimator,
-                pm,
-                backend,
-                n_qubits,
-                pipeline_cfg["num_layers_per_event"],
-                shots,
-                checkpoint_prefix=args.checkpoint_dir / f"iter{iter_idx}_short_test",
+            res_long = (
+                iter_res_by_dataset.get("long_train", [])
+                + iter_res_by_dataset.get("long_val", [])
+                + iter_res_by_dataset.get("long_test", [])
             )
 
-            P_tr_long, res_long = run_estimator_for_dataset(
-                X_train_q[long_mask_train],
-                ising_long,
-                estimator,
-                pm,
-                backend,
-                n_qubits,
-                pipeline_cfg["num_layers_per_event"],
-                shots,
-                checkpoint_prefix=args.checkpoint_dir / f"iter{iter_idx}_long_train",
-            )
-            P_vl_long, _ = run_estimator_for_dataset(
-                X_val_q[long_mask_val],
-                ising_long,
-                estimator,
-                pm,
-                backend,
-                n_qubits,
-                pipeline_cfg["num_layers_per_event"],
-                shots,
-                checkpoint_prefix=args.checkpoint_dir / f"iter{iter_idx}_long_val",
-            )
-            P_te_long, _ = run_estimator_for_dataset(
-                X_test_q[long_test_idx],
-                ising_long,
-                estimator,
-                pm,
-                backend,
-                n_qubits,
-                pipeline_cfg["num_layers_per_event"],
-                shots,
-                checkpoint_prefix=args.checkpoint_dir / f"iter{iter_idx}_long_test",
-            )
+            P_tr_short = pauli_matrices["short_train"]
+            P_vl_short = pauli_matrices["short_val"]
+            P_te_short = pauli_matrices["short_test"]
+            P_tr_long = pauli_matrices["long_train"]
+            P_vl_long = pauli_matrices["long_val"]
+            P_te_long = pauli_matrices["long_test"]
 
             H_tr_short = make_hybrid_features_decay(P_tr_short, n_total_events, n_obs)
             H_vl_short = make_hybrid_features_decay(P_vl_short, n_total_events, n_obs)
@@ -475,6 +681,7 @@ def main():
                     "test_pred": test_pred,
                     "resource_short": res_short,
                     "resource_long": res_long,
+                    "runtime_usage_estimation": usage_estimation,
                 }
             )
             print(f"Iteration {iter_idx} complete | test_mae={iter_results[-1]['test_mae']:.2f}")
@@ -484,6 +691,10 @@ def main():
             batch_usage = batch.usage()
         except Exception:
             pass
+
+    if all_resource_rows:
+        print("\n=== Aggregate resource estimate across all submitted iterations ===")
+        print_resource_report(all_resource_rows, args.backend)
 
     ensemble_pred = np.mean([r["test_pred"] for r in iter_results], axis=0)
     summary = {
