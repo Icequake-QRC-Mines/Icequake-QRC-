@@ -6,3 +6,6 @@ xgboost
 qiskit
 qiskit-aer
 qiskit-ibm-runtime
+matplotlib
+pylatexenc
+seaborn

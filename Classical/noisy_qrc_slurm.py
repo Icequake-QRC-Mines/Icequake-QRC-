@@ -28,11 +28,14 @@ from qiskit.transpiler import PassManager
 from qiskit_aer import AerSimulator
 from qiskit_aer.noise import NoiseModel
 from qiskit_ibm_runtime.fake_provider import FakeFez, FakeSherbrooke
-from sklearn.metrics import accuracy_score, mean_absolute_error, r2_score, root_mean_squared_error
+from sklearn.metrics import (
+    accuracy_score,
+    mean_absolute_error,
+    r2_score,
+    root_mean_squared_error,
+)
 from sklearn.utils.class_weight import compute_sample_weight
 from xgboost import XGBClassifier, XGBRegressor
-
-from Preprocess import preprocess_data_window
 
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -58,8 +61,12 @@ class QRCConfig:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Noisy QRC pipeline with SLURM support.")
-    parser.add_argument("--output-dir", type=Path, default=Path("Classical/results/noisy_qrc_run"))
+    parser = argparse.ArgumentParser(
+        description="Noisy QRC pipeline with SLURM support."
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("Classical/results/noisy_qrc_run")
+    )
     parser.add_argument("--shots", type=int, default=4096)
     parser.add_argument("--n-iterations", type=int, default=5)
     parser.add_argument("--top-k", type=int, default=3)
@@ -68,8 +75,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--subset-frac", type=float, default=1.0)
     parser.add_argument("--n-jobs", type=int, default=1)
     parser.add_argument("--device", choices=["cpu", "gpu"], default="cpu")
-    parser.add_argument("--batch-size", type=int, default=8, help="Max circuits per Aer run() batch")
-    parser.add_argument("--max-memory-mb", type=int, default=None, help="Aer max_memory_mb override")
+    parser.add_argument(
+        "--batch-size", type=int, default=8, help="Max circuits per Aer run() batch"
+    )
+    parser.add_argument(
+        "--max-memory-mb", type=int, default=None, help="Aer max_memory_mb override"
+    )
     parser.add_argument("--aggregate", action="store_true")
     parser.add_argument("--estimate-only", action="store_true")
     parser.add_argument(
@@ -112,7 +123,13 @@ def scale_to_pi_range(
     return transform(X_train), transform(X_val), transform(X_test), train_min, train_max
 
 
-def generate_ising_params(n_qubits: int, rng: np.random.Generator, J_std: float = 0.5, h: float = 1.0, t: float = 0.5):
+def generate_ising_params(
+    n_qubits: int,
+    rng: np.random.Generator,
+    J_std: float = 0.5,
+    h: float = 1.0,
+    t: float = 0.5,
+):
     J = np.zeros((n_qubits, n_qubits))
     for i in range(n_qubits):
         for j in range(i + 1, n_qubits):
@@ -120,7 +137,14 @@ def generate_ising_params(n_qubits: int, rng: np.random.Generator, J_std: float 
     return J, h, t
 
 
-def trotter_ising_layer(qc: QuantumCircuit, n_qubits: int, J: np.ndarray, h: float, t: float, n_trotter_steps: int = 3) -> None:
+def trotter_ising_layer(
+    qc: QuantumCircuit,
+    n_qubits: int,
+    J: np.ndarray,
+    h: float,
+    t: float,
+    n_trotter_steps: int = 3,
+) -> None:
     dt = t / n_trotter_steps
     for _ in range(n_trotter_steps):
         for i in range(n_qubits):
@@ -133,7 +157,9 @@ def trotter_ising_layer(qc: QuantumCircuit, n_qubits: int, J: np.ndarray, h: flo
             qc.rx(2 * h * dt, i)
 
 
-def build_parametric_reservoir_circuit(ising_params, num_layers: int, n_qubits: int) -> Tuple[QuantumCircuit, List[Parameter]]:
+def build_parametric_reservoir_circuit(
+    ising_params, num_layers: int, n_qubits: int
+) -> Tuple[QuantumCircuit, List[Parameter]]:
     J, h, t = ising_params
     thetas = [Parameter(f"theta_{i}") for i in range(n_qubits)]
     qc = QuantumCircuit(n_qubits)
@@ -217,7 +243,9 @@ def _counts_to_basis_exp(counts, n_qubits: int, shots: int):
     return exp
 
 
-def estimate_resources(isa_circuit: QuantumCircuit, backend, shots: int, n_bindings: int) -> Dict[str, float]:
+def estimate_resources(
+    isa_circuit: QuantumCircuit, backend, shots: int, n_bindings: int
+) -> Dict[str, float]:
     ops = isa_circuit.count_ops()
     depth = float(isa_circuit.depth())
     size = float(sum(ops.values()))
@@ -240,7 +268,9 @@ def estimate_resources(isa_circuit: QuantumCircuit, backend, shots: int, n_bindi
     total_duration = None
     if hasattr(isa_circuit, "estimate_duration"):
         try:
-            total_duration = float(isa_circuit.estimate_duration(target=backend.target, unit="s"))
+            total_duration = float(
+                isa_circuit.estimate_duration(target=backend.target, unit="s")
+            )
         except Exception:
             total_duration = None
 
@@ -287,7 +317,13 @@ def run_quantum_reservoir_pauli(
     resources = []
 
     for event_idx in range(n_total_events):
-        ckpt = None if checkpoint_prefix is None else checkpoint_prefix.with_name(f"{checkpoint_prefix.name}_event{event_idx}.npy")
+        ckpt = (
+            None
+            if checkpoint_prefix is None
+            else checkpoint_prefix.with_name(
+                f"{checkpoint_prefix.name}_event{event_idx}.npy"
+            )
+        )
         if ckpt and resume and ckpt.exists():
             block = np.load(ckpt)
             pauli_matrix[:, event_idx * n_obs : (event_idx + 1) * n_obs] = block
@@ -296,11 +332,17 @@ def run_quantum_reservoir_pauli(
         start_col = event_idx * cfg.n_qubits
         end_col = start_col + cfg.n_qubits
         X_event = X_data[:, start_col:end_col]
-        template, params = build_parametric_reservoir_circuit(angle_bank[event_idx], cfg.num_layers_per_event, cfg.n_qubits)
+        template, params = build_parametric_reservoir_circuit(
+            angle_bank[event_idx], cfg.num_layers_per_event, cfg.n_qubits
+        )
         isa_template = local_transpile(template)
-        resources.append(estimate_resources(isa_template, backend, cfg.shots, len(X_event)))
+        resources.append(
+            estimate_resources(isa_template, backend, cfg.shots, len(X_event))
+        )
 
-        bound = [isa_template.assign_parameters(dict(zip(params, row))) for row in X_event]
+        bound = [
+            isa_template.assign_parameters(dict(zip(params, row))) for row in X_event
+        ]
         batch_z = [add_measurement_basis(c, "Z") for c in bound]
         batch_x = [add_measurement_basis(c, "X") for c in bound]
         batch_y = [add_measurement_basis(c, "Y") for c in bound]
@@ -336,13 +378,19 @@ def run_quantum_reservoir_pauli(
         if ckpt:
             np.save(ckpt, event_block)
         resources[-1]["aer_time_taken_seconds"] = aer_time_taken
-        print(f"  Event {event_idx + 1}/{n_total_events} complete | aer_time={aer_time_taken:.2f}s")
+        print(
+            f"\tEvent {event_idx + 1}/{n_total_events} complete | aer_time={aer_time_taken:.2f}s"
+        )
 
     return pauli_matrix, resources
 
 
-def make_hybrid_features_decay(P_matrix: np.ndarray, n_total_events: int, n_obs: int, decay: float = 0.3):
-    weights = np.array([np.exp(-decay * (n_total_events - 1 - i)) for i in range(n_total_events)])
+def make_hybrid_features_decay(
+    P_matrix: np.ndarray, n_total_events: int, n_obs: int, decay: float = 0.3
+):
+    weights = np.array(
+        [np.exp(-decay * (n_total_events - 1 - i)) for i in range(n_total_events)]
+    )
     weights /= weights.sum()
     weighted = P_matrix.copy()
     for event_idx in range(n_total_events):
@@ -360,7 +408,9 @@ def tune_and_train_regressor(X_train, y_train, X_val, y_val, seed: int, n_trials
             "random_state": 42,
             "early_stopping_rounds": 50,
             "tree_method": "hist",
-            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.15, log=True),
+            "learning_rate": trial.suggest_float(
+                "learning_rate", 0.005, 0.15, log=True
+            ),
             "max_depth": trial.suggest_int("max_depth", 2, 8),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
@@ -373,7 +423,9 @@ def tune_and_train_regressor(X_train, y_train, X_val, y_val, seed: int, n_trials
         pred = model.predict(X_val)
         return mean_absolute_error(y_val, pred)
 
-    study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
+    study = optuna.create_study(
+        direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed)
+    )
     study.optimize(objective, n_trials=n_trials)
     best = study.best_trial.params
     full_params = {
@@ -398,7 +450,9 @@ def task_to_iter_regime(task_id: int, n_iterations: int):
     return iter_idx, regime
 
 
-def train_classifier(X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, threshold: int):
+def train_classifier(
+    X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, threshold: int
+):
     y_clf_train = (y_train >= threshold).astype(int)
     y_clf_val = (y_val >= threshold).astype(int)
     y_clf_test = (y_test >= threshold).astype(int)
@@ -413,12 +467,22 @@ def train_classifier(X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, thres
         random_state=42,
         eval_metric="logloss",
     )
-    clf.fit(X_train_q, y_clf_train, sample_weight=sample_weights, eval_set=[(X_val_q, y_clf_val)], verbose=False)
-    print(f"Classifier test acc: {accuracy_score(y_clf_test, clf.predict(X_test_q)):.4f}")
+    clf.fit(
+        X_train_q,
+        y_clf_train,
+        sample_weight=sample_weights,
+        eval_set=[(X_val_q, y_clf_val)],
+        verbose=False,
+    )
+    print(
+        f"Classifier test acc: {accuracy_score(y_clf_test, clf.predict(X_test_q)):.4f}"
+    )
     return clf
 
 
 def load_data(cfg: QRCConfig, subset_frac: float):
+    from Preprocess import preprocess_data_window
+
     repo_root = Path(__file__).resolve().parent.parent
     data_csv = repo_root / "Whillians-GPS-Data-and-Features.csv"
     filtered_csv = repo_root / "filtered_time_to_next_event.csv"
@@ -429,15 +493,30 @@ def load_data(cfg: QRCConfig, subset_frac: float):
         )
     data_orig = pd.read_csv(data_csv)
     filtered_time = pd.read_csv(filtered_csv)
-    X_train, X_val, X_test, y_train, y_val, y_test, _ = preprocess_data_window(filtered_time, data_orig, cfg.n_previous_events)
+    X_train, X_val, X_test, y_train, y_val, y_test, _ = preprocess_data_window(
+        filtered_time, data_orig, cfg.n_previous_events
+    )
     if subset_frac < 1.0:
         rng = np.random.default_rng(cfg.random_seed)
-        train_idx = rng.choice(len(X_train), size=max(20, int(len(X_train) * subset_frac)), replace=False)
+        train_idx = rng.choice(
+            len(X_train), size=max(20, int(len(X_train) * subset_frac)), replace=False
+        )
         train_idx.sort()
         X_train = X_train.iloc[train_idx]
         y_train = y_train.iloc[train_idx]
-    X_train_q, X_val_q, X_test_q, train_min, train_max = scale_to_pi_range(X_train.to_numpy(), X_val.to_numpy(), X_test.to_numpy())
-    return X_train_q, X_val_q, X_test_q, y_train.to_numpy(), y_val.to_numpy(), y_test.to_numpy(), train_min, train_max
+    X_train_q, X_val_q, X_test_q, train_min, train_max = scale_to_pi_range(
+        X_train.to_numpy(), X_val.to_numpy(), X_test.to_numpy()
+    )
+    return (
+        X_train_q,
+        X_val_q,
+        X_test_q,
+        y_train.to_numpy(),
+        y_val.to_numpy(),
+        y_test.to_numpy(),
+        train_min,
+        train_max,
+    )
 
 
 def save_json(path: Path, payload):
@@ -453,8 +532,12 @@ def run_partial_task(args: argparse.Namespace, cfg: QRCConfig):
     partial_dir = out_dir / "partials"
     partial_dir.mkdir(parents=True, exist_ok=True)
 
-    X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, *_ = load_data(cfg, args.subset_frac)
-    clf = train_classifier(X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, cfg.short_threshold)
+    X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, *_ = load_data(
+        cfg, args.subset_frac
+    )
+    clf = train_classifier(
+        X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, cfg.short_threshold
+    )
     clf_test_labels = clf.predict(X_test_q)
 
     short_mask_train = y_train < cfg.short_threshold
@@ -464,17 +547,32 @@ def run_partial_task(args: argparse.Namespace, cfg: QRCConfig):
     short_test_idx = np.where(clf_test_labels == 0)[0]
     long_test_idx = np.where(clf_test_labels == 1)[0]
 
-    rng = np.random.default_rng(cfg.random_seed + iter_idx + (0 if regime == "short" else 10_000))
-    angle_bank = [generate_ising_params(cfg.n_qubits, rng) for _ in range(cfg.n_previous_events + 1)]
+    rng = np.random.default_rng(
+        cfg.random_seed + iter_idx + (0 if regime == "short" else 10_000)
+    )
+    angle_bank = [
+        generate_ising_params(cfg.n_qubits, rng)
+        for _ in range(cfg.n_previous_events + 1)
+    ]
     _, sim, local_transpile = build_noisy_simulator(args.device, args.max_memory_mb)
     fake_backend = FakeSherbrooke()
 
     if regime == "short":
-        Xtr, Xvl, Xte = X_train_q[short_mask_train], X_val_q[short_mask_val], X_test_q[short_test_idx]
+        Xtr, Xvl, Xte = (
+            X_train_q[short_mask_train],
+            X_val_q[short_mask_val],
+            X_test_q[short_test_idx],
+        )
     else:
-        Xtr, Xvl, Xte = X_train_q[long_mask_train], X_val_q[long_mask_val], X_test_q[long_test_idx]
+        Xtr, Xvl, Xte = (
+            X_train_q[long_mask_train],
+            X_val_q[long_mask_val],
+            X_test_q[long_test_idx],
+        )
 
-    print(f"Running partial: iteration={iter_idx} regime={regime} train={len(Xtr)} val={len(Xvl)} test={len(Xte)}")
+    print(
+        f"Running partial: iteration={iter_idx} regime={regime} train={len(Xtr)} val={len(Xvl)} test={len(Xte)}"
+    )
     t0 = time.time()
     P_tr, resources = run_quantum_reservoir_pauli(
         Xtr,
@@ -524,14 +622,18 @@ def run_partial_task(args: argparse.Namespace, cfg: QRCConfig):
     partial_path = partial_dir / f"partial_iter{iter_idx}_{regime}.pkl"
     with partial_path.open("wb") as f:
         pickle.dump(payload, f)
-    print(f"Saved partial artifact -> {partial_path}")
+    print(f"Saved partial artifact: {partial_path}")
 
 
 def aggregate_partials(args: argparse.Namespace, cfg: QRCConfig):
     out_dir = args.output_dir
     partial_dir = out_dir / "partials"
-    X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, train_min, train_max = load_data(cfg, args.subset_frac)
-    clf = train_classifier(X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, cfg.short_threshold)
+    X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, train_min, train_max = (
+        load_data(cfg, args.subset_frac)
+    )
+    clf = train_classifier(
+        X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, cfg.short_threshold
+    )
     clf_val_labels = clf.predict(X_val_q)
     clf_test_labels = clf.predict(X_test_q)
     short_mask_train = y_train < cfg.short_threshold
@@ -564,26 +666,52 @@ def aggregate_partials(args: argparse.Namespace, cfg: QRCConfig):
         y_vl_short = y_val[short_mask_val]
         y_vl_long = y_val[long_mask_val]
 
-        model_short, short_params = tune_and_train_regressor(H_tr_short, y_tr_short, H_vl_short, y_vl_short, cfg.random_seed + i, cfg.optuna_trials)
-        model_long, long_params = tune_and_train_regressor(H_tr_long, y_tr_long, H_vl_long, y_vl_long, cfg.random_seed + i + 1, cfg.optuna_trials)
+        model_short, short_params = tune_and_train_regressor(
+            H_tr_short,
+            y_tr_short,
+            H_vl_short,
+            y_vl_short,
+            cfg.random_seed + i,
+            cfg.optuna_trials,
+        )
+        model_long, long_params = tune_and_train_regressor(
+            H_tr_long,
+            y_tr_long,
+            H_vl_long,
+            y_vl_long,
+            cfg.random_seed + i + 1,
+            cfg.optuna_trials,
+        )
 
         test_pred = np.empty(len(X_test_q))
         test_pred[short_test_idx] = model_short.predict(H_te_short)
         test_pred[long_test_idx] = model_long.predict(H_te_long)
 
         val_pred = np.empty(len(X_val_q))
-        short_val_positions = {idx: pos for pos, idx in enumerate(np.where(short_mask_val)[0])}
-        long_val_positions = {idx: pos for pos, idx in enumerate(np.where(long_mask_val)[0])}
+        short_val_positions = {
+            idx: pos for pos, idx in enumerate(np.where(short_mask_val)[0])
+        }
+        long_val_positions = {
+            idx: pos for pos, idx in enumerate(np.where(long_mask_val)[0])
+        }
         for idx in short_val_idx:
             if idx in short_val_positions:
-                val_pred[idx] = model_short.predict(H_vl_short[short_val_positions[idx] : short_val_positions[idx] + 1])[0]
+                val_pred[idx] = model_short.predict(
+                    H_vl_short[short_val_positions[idx] : short_val_positions[idx] + 1]
+                )[0]
             elif idx in long_val_positions:
-                val_pred[idx] = model_short.predict(H_vl_long[long_val_positions[idx] : long_val_positions[idx] + 1])[0]
+                val_pred[idx] = model_short.predict(
+                    H_vl_long[long_val_positions[idx] : long_val_positions[idx] + 1]
+                )[0]
         for idx in long_val_idx:
             if idx in long_val_positions:
-                val_pred[idx] = model_long.predict(H_vl_long[long_val_positions[idx] : long_val_positions[idx] + 1])[0]
+                val_pred[idx] = model_long.predict(
+                    H_vl_long[long_val_positions[idx] : long_val_positions[idx] + 1]
+                )[0]
             elif idx in short_val_positions:
-                val_pred[idx] = model_long.predict(H_vl_short[short_val_positions[idx] : short_val_positions[idx] + 1])[0]
+                val_pred[idx] = model_long.predict(
+                    H_vl_short[short_val_positions[idx] : short_val_positions[idx] + 1]
+                )[0]
 
         all_results.append(
             {
@@ -600,7 +728,9 @@ def aggregate_partials(args: argparse.Namespace, cfg: QRCConfig):
                 "angle_bank_long": pl["angle_bank"],
             }
         )
-        print(f"Aggregated iteration {i + 1}/{cfg.n_iterations} | val_mae={all_results[-1]['val_mae']:.2f}")
+        print(
+            f"Aggregated iteration {i + 1}/{cfg.n_iterations} | val_mae={all_results[-1]['val_mae']:.2f}"
+        )
 
     top_results = sorted(all_results, key=lambda r: r["val_mae"])[: cfg.top_k]
     top_indices = [r["iteration"] for r in top_results]
@@ -617,8 +747,17 @@ def aggregate_partials(args: argparse.Namespace, cfg: QRCConfig):
     hardware_config = {
         "top_k_indices": top_indices,
         "top_k_seeds": [cfg.random_seed + i for i in top_indices],
-        "ising_params_per_iteration": {r["iteration"]: {"short": r["angle_bank_short"], "long": r["angle_bank_long"]} for r in top_results},
-        "xgb_params_per_iteration": {r["iteration"]: {"short": r["short_params"], "long": r["long_params"]} for r in top_results},
+        "ising_params_per_iteration": {
+            r["iteration"]: {
+                "short": r["angle_bank_short"],
+                "long": r["angle_bank_long"],
+            }
+            for r in top_results
+        },
+        "xgb_params_per_iteration": {
+            r["iteration"]: {"short": r["short_params"], "long": r["long_params"]}
+            for r in top_results
+        },
         "regime_classifier": clf,
         "pipeline_config": cfg.__dict__,
         "scaling_params": {"train_min": train_min, "train_max": train_max},
@@ -644,7 +783,9 @@ def parse_fraction_sweep_arg(raw: str | None, default_frac: float) -> List[float
     clean = sorted(set(fracs))
     for frac in clean:
         if not (0.0 < frac <= 1.0):
-            raise ValueError(f"Invalid fraction {frac}. Fractions must satisfy 0 < frac <= 1.")
+            raise ValueError(
+                f"Invalid fraction {frac}. Fractions must satisfy 0 < frac <= 1."
+            )
     return clean
 
 
@@ -655,8 +796,12 @@ def _compute_estimate(
     backend,
     local_transpile,
 ) -> Dict[str, Any]:
-    X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, *_ = load_data(cfg, subset_frac)
-    clf = train_classifier(X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, cfg.short_threshold)
+    X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, *_ = load_data(
+        cfg, subset_frac
+    )
+    clf = train_classifier(
+        X_train_q, X_val_q, X_test_q, y_train, y_val, y_test, cfg.short_threshold
+    )
     clf_test_labels = clf.predict(X_test_q)
 
     short_mask_train = y_train < cfg.short_threshold
@@ -693,10 +838,16 @@ def _compute_estimate(
         iter_execs = 0
         iter_regime_breakdown = {}
         for regime in ("short", "long"):
-            rng = np.random.default_rng(cfg.random_seed + iter_idx + (0 if regime == "short" else 10_000))
-            angle_bank = [generate_ising_params(cfg.n_qubits, rng) for _ in range(n_events)]
+            rng = np.random.default_rng(
+                cfg.random_seed + iter_idx + (0 if regime == "short" else 10_000)
+            )
+            angle_bank = [
+                generate_ising_params(cfg.n_qubits, rng) for _ in range(n_events)
+            ]
             n_bindings = (
-                regime_sizes[regime]["train"] + regime_sizes[regime]["val"] + regime_sizes[regime]["test"]
+                regime_sizes[regime]["train"]
+                + regime_sizes[regime]["val"]
+                + regime_sizes[regime]["test"]
             ) * basis_multiplier
             regime_total = 0.0
             for event_idx in range(n_events):
@@ -738,11 +889,15 @@ def save_estimate_plot(estimates: List[Dict[str, Any]], output_path: Path) -> No
     try:
         import matplotlib.pyplot as plt
     except Exception as exc:
-        raise RuntimeError("matplotlib is required for --estimate-plot output.") from exc
+        raise RuntimeError(
+            "matplotlib is required for --estimate-plot output."
+        ) from exc
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     xs = [e["subset_frac"] for e in estimates]
-    ys_minutes = [max(e["grand_total_est_qpu_equiv_seconds"] / 60.0, 1e-12) for e in estimates]
+    ys_minutes = [
+        max(e["grand_total_est_qpu_equiv_seconds"] / 60.0, 1e-12) for e in estimates
+    ]
     ys_circuits = [max(float(e["total_circuit_executions"]), 1.0) for e in estimates]
 
     fig, ax1 = plt.subplots(figsize=(9.2, 5.4))
@@ -789,7 +944,12 @@ def save_estimate_plot(estimates: List[Dict[str, Any]], output_path: Path) -> No
             ha="center",
             color="#1f77b4",
             fontsize=8,
-            bbox={"boxstyle": "round,pad=0.15", "fc": "white", "ec": "none", "alpha": 0.75},
+            bbox={
+                "boxstyle": "round,pad=0.15",
+                "fc": "white",
+                "ec": "none",
+                "alpha": 0.75,
+            },
         )
     for x, y in zip(xs, ys_circuits):
         ax2.annotate(
@@ -800,7 +960,12 @@ def save_estimate_plot(estimates: List[Dict[str, Any]], output_path: Path) -> No
             ha="center",
             color="#d62728",
             fontsize=8,
-            bbox={"boxstyle": "round,pad=0.15", "fc": "white", "ec": "none", "alpha": 0.75},
+            bbox={
+                "boxstyle": "round,pad=0.15",
+                "fc": "white",
+                "ec": "none",
+                "alpha": 0.75,
+            },
         )
 
     lines = line1 + line2

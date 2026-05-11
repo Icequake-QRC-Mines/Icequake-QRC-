@@ -26,6 +26,8 @@ CONFIG_PATH="${CONFIG_PATH:-${CODE_DIR}/results/noisy_qrc_run/hardware_config.pk
 OUTPUT_DIR="${OUTPUT_DIR:-${CODE_DIR}/results/hardware_qrc_run}"
 BACKEND="${BACKEND:-ibm_sherbrooke}"
 SHOTS="${SHOTS:-4096}"
+SUBSET_FRAC="${SUBSET_FRAC:-1.0}"
+SUBSET_SEED="${SUBSET_SEED:-}"
 MODULES_TO_LOAD="${MODULES_TO_LOAD:-uv}"
 UV_ENV_PATH="${UV_ENV_PATH:-${UV_ENVS:-/projects/${USER}/software/uv/envs}/qrc}"
 UV_REQUIREMENTS_FILE="${UV_REQUIREMENTS_FILE:-${CODE_DIR}/requirements-curc.txt}"
@@ -78,9 +80,16 @@ PYTHON_BIN="${UV_ENV_PATH}/bin/python"
 echo "Using python: ${PYTHON_BIN}"
 "${PYTHON_BIN}" -V
 
+subset_seed_args=()
+if [[ -n "${SUBSET_SEED}" ]]; then
+  subset_seed_args=(--subset-seed "${SUBSET_SEED}")
+fi
+
 "${PYTHON_BIN}" "${CODE_DIR}/hardware_qrc.py" \
   --config "${CONFIG_PATH}" \
   --output-dir "${OUTPUT_DIR}" \
   --backend "${BACKEND}" \
   --shots "${SHOTS}" \
+  --subset-frac "${SUBSET_FRAC}" \
+  "${subset_seed_args[@]}" \
   --no-confirm
