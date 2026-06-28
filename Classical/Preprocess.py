@@ -8,7 +8,52 @@ from sklearn.preprocessing import StandardScaler
 from sdv.single_table import GaussianCopulaSynthesizer
 from sdv.metadata import SingleTableMetadata
 
+def preprocess_data_window_same_input_output(filtered_time, data_orig, n_previous_events, random_state=42):
+    base_mask = filtered_time["time_to_next_ev_hr"] != -1
+    filter_mask = base_mask.copy()
+    for i in range(1, n_previous_events+1):
+        base_mask &= base_mask.shift(i) # this is checking events n-1, n-2, n-3, ... to see if they are valid
+    filter_mask &= base_mask.shift(-1) # this is checking the event n+1 to see if it is valid
+    filter_mask.fillna(False, inplace=True)
+    '''
+    base_mask = filtered_time["time_to_next_ev_hr"] != -1
 
+    # Only require the current event and the next event to be valid
+    filter_mask = base_mask & base_mask.shift(-1)
+
+    filter_mask.fillna(False, inplace=True)'''
+
+    feature_cols = ["tide_deriv", "form_fac", "high_t_evt", "tide_height"]
+    X = data_orig[feature_cols].copy()[1:]
+    y = data_orig[feature_cols].copy().shift(-1)[:-1]
+    # TODO: filtered_time[filtered_time["time_to_next_ev_hr"] < 12*60*60].shift(1)
+    # first make pairs of feature rows with its previous n events
+    # we can do this by shifting the feature rows down by 1 and then creating tuples of. If a row is 1xN where N 
+    # is the number of features, we want each data point to be a 1x (N*(n_previous_events+1)) array of features, where 
+    # the N elements of the  first row is the current event and the next n_previous_events rows are the previous events.
+    windows = [X]
+    for i in range(1, n_previous_events+1):
+        shifted = X.shift(i)
+        shifted.columns = [f"{col}-{i}" for col in feature_cols]
+        windows.append(shifted)
+    
+    windows[0].columns = [f"{col}-0" for col in feature_cols]
+    
+    X_full = pd.concat(windows, axis=1).loc[filter_mask] # combine window of events with original event
+    y = y.loc[filter_mask]
+
+    print("X shape: ", X_full.shape)
+    print("y shape: ", y.shape)
+
+    X_train, X_test, y_train, y_test = train_test_split(X_full, y, test_size=0.2, random_state=random_state, shuffle=False)
+    X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.25, random_state=random_state, shuffle=False)
+
+    '''scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_val = scaler.transform(X_val)
+    X_test = scaler.transform(X_test)'''
+
+    return X_train, X_val, X_test, y_train, y_val, y_test, feature_cols 
 
 
 '''def augment_with_sdv(X, y, target_col, n_samples, random_state=42):

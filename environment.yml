@@ -1,0 +1,24 @@
+name: Icequake-QRC
+channels:
+  - conda-forge
+dependencies:
+  - catboost
+  - ipykernel
+  - ipywidgets
+  - jupyterlab
+  - matplotlib
+  - numpy
+  - optuna
+  - pandas
+  - pytest
+  - python=3.12
+  - qiskit
+  - qiskit-aer
+  - qiskit-ibm-runtime
+  - scikit-learn
+  - scipy
+  - sdv
+  - seaborn
+  - shap
+  - tqdm
+  - xgboost
