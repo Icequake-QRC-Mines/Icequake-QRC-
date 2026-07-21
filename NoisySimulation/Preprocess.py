@@ -40,7 +40,7 @@ def preprocess_data_window_same_input_output(filtered_time, data_orig, n_previou
     windows[0].columns = [f"{col}-0" for col in feature_cols]
     
     X_full = pd.concat(windows, axis=1).loc[filter_mask] # combine window of events with original event
-    y = y.loc[filter_mask]
+    y = y.loc[filter_mask, ]
 
     print("X shape: ", X_full.shape)
     print("y shape: ", y.shape)
@@ -88,6 +88,31 @@ def preprocess_data_window_same_input_output(filtered_time, data_orig, n_previou
 
     return X_aug, y_aug, '''
 
+
+def preprocess_data_chronological(filtered_time, data_orig):
+    base_mask = filtered_time["time_to_next_ev_hr"] != -1
+    filter_mask = base_mask.copy()
+
+    TTNS = filtered_time[filter_mask.shift(1) & filter_mask & filter_mask.shift(-1)][1:-1]
+
+    data = data_orig.loc[filter_mask]
+    feature_cols = ["tide_deriv", "form_fac", "time_since", "slip_size", "high_t_evt", "tide_height"]
+    X = data[feature_cols]
+    X['time_since'] *= 60
+    y = TTNS["time_to_next_ev_hr"] * 3600
+
+    train_size = len(TTNS)*0.6
+    val_size = len(TTNS)*0.2
+    test_size = len(TTNS)*0.2
+
+    X_train = X.iloc[:train_size]
+    X_val = X.iloc[train_size:train_size+val_size]
+    X_test = X.iloc[train_size+val_size:train_size+val_size+test_size]
+    y_train = y.iloc[:train_size]
+    y_val = y.iloc[train_size:train_size+val_size]
+    y_test = y.iloc[train_size+val_size:train_size+val_size+test_size]
+
+    return X_train, X_val, X_test, y_train, y_val, y_test, feature_cols
 
 def preprocess_data_window(filtered_time, data_orig, n_previous_events, random_state=42):
     base_mask = filtered_time["time_to_next_ev_hr"] != -1
