@@ -5,8 +5,8 @@ import seaborn as sns
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler 
-from sdv.single_table import GaussianCopulaSynthesizer
-from sdv.metadata import SingleTableMetadata
+#from sdv.single_table import GaussianCopulaSynthesizer
+#from sdv.metadata import SingleTableMetadata
 
 def preprocess_data_window_same_input_output(filtered_time, data_orig, n_previous_events, random_state=42):
     base_mask = filtered_time["time_to_next_ev_hr"] != -1

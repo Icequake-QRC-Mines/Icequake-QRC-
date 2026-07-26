@@ -5,8 +5,8 @@ import seaborn as sns
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler 
-from sdv.single_table import GaussianCopulaSynthesizer
-from sdv.metadata import SingleTableMetadata
+#from sdv.single_table import GaussianCopulaSynthesizer
+#from sdv.metadata import SingleTableMetadata
 
 def preprocess_data_window_same_input_output(filtered_time, data_orig, n_previous_events, random_state=42):
     base_mask = filtered_time["time_to_next_ev_hr"] != -1
@@ -245,3 +245,28 @@ def preprocess_data(filtered_time, data_orig):
     X_test = scaler.transform(X_test)
     
     return X_train.to_numpy(), X_val.to_numpy(), X_test.to_numpy(), y_train.to_numpy(), y_val.to_numpy(), y_test.to_numpy(), feature_cols, amount_of_known
+def preprocess_data_chronological(filtered_time, data_orig):
+    base_mask = filtered_time["time_to_next_ev_hr"] != -1
+    filter_mask = base_mask.copy()
+    filter_mask.fillna(False, inplace=True)
+    TTNS = filtered_time[filter_mask.shift(1) & filter_mask & filter_mask.shift(-1)][1:-1]
+
+    feature_cols = ["tide_deriv", "form_fac", "time_since", "slip_size", "high_t_evt", "tide_height"]
+    X = data_orig[feature_cols].loc[filter_mask.shift(1) & filter_mask & filter_mask.shift(-1)][1:-1]
+    X['time_since'] *= 60
+    y = TTNS["time_to_next_ev_hr"] * 3600
+
+    n = len(TTNS)
+    train_size = int(n * 0.6)
+    val_size = int(n * 0.2)
+    test_start = train_size + val_size
+
+    X_train = X.iloc[:train_size]
+    X_val = X.iloc[train_size:test_start]
+    X_test = X.iloc[test_start:]
+    y_train = y.iloc[:train_size]
+    y_val = y.iloc[train_size:test_start]
+    y_test = y.iloc[test_start:]
+
+    return X_train, X_val, X_test, y_train, y_val, y_test, feature_cols
+ 
